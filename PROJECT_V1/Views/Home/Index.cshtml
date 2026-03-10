@@ -1,0 +1,219 @@
+@using System.Linq
+@using Microsoft.AspNetCore.Mvc.Rendering
+@model PROJECT_V1.Models.ProposalViewModel
+
+@{
+    ViewData["Title"] = "Sales Proposal Builder";
+    var assumptionsText = Model.Result?.Assumptions != null
+        ? string.Join(Environment.NewLine, Model.Result.Assumptions.Select(item => $"- {item}"))
+        : string.Empty;
+}
+
+<section class="hero">
+    <div class="hero-copy">
+        <span class="eyebrow">Sales Proposal Studio</span>
+        <h1>Sales Proposal Builder</h1>
+        <p>
+            Turn structured client inputs into a polished, persuasive proposal in seconds.
+            Built for fast demos and high-impact pitches.
+        </p>
+        <div class="hero-stats">
+            <div>
+                <span class="stat-value">6</span>
+                <span class="stat-label">Core sections</span>
+            </div>
+            <div>
+                <span class="stat-value">1</span>
+                <span class="stat-label">Click to generate</span>
+            </div>
+            <div>
+                <span class="stat-value">JSON</span>
+                <span class="stat-label">Structured output</span>
+            </div>
+        </div>
+    </div>
+    <div class="hero-panel">
+        <h3>Demo Ready</h3>
+        <p>Drop in client details, choose a tone, and let the model craft a proposal that feels tailored and executive-grade.</p>
+        <div class="pill-row">
+            <span class="pill">Executive Summary</span>
+            <span class="pill">Scope</span>
+            <span class="pill">Timeline</span>
+            <span class="pill">Pricing</span>
+        </div>
+    </div>
+</section>
+
+@if (!string.IsNullOrWhiteSpace(Model.ErrorMessage))
+{
+    <div class="error-banner">
+        <strong>Heads up:</strong> @Model.ErrorMessage
+    </div>
+}
+
+<div class="grid">
+    <section class="card form-card">
+        <div class="card-header">
+            <div>
+                <h2>Client Inputs</h2>
+                <p>Give the model just enough structure to produce a confident proposal.</p>
+            </div>
+            <span class="status-pill">Input</span>
+        </div>
+
+        <form asp-action="Index" method="post" id="proposalForm" class="stack" autocomplete="off">
+            @Html.AntiForgeryToken()
+            @Html.ValidationSummary(false, "", new { @class = "field-error" })
+
+            <div class="field">
+                <label asp-for="Request.ClientName">Client Name</label>
+                <input asp-for="Request.ClientName" placeholder="Acme Ventures" autocomplete="off" />
+                <span asp-validation-for="Request.ClientName" class="field-error"></span>
+            </div>
+
+            <div class="field">
+                <label asp-for="Request.Industry">Industry</label>
+                <select asp-for="Request.Industry" asp-items="@(new SelectList(Model.Industries))">
+                    <option value="">Select industry</option>
+                </select>
+                <span asp-validation-for="Request.Industry" class="field-error"></span>
+            </div>
+
+            <div class="field">
+                <label asp-for="Request.Requirements">Business Requirements</label>
+                <textarea asp-for="Request.Requirements" rows="6" maxlength="1000" placeholder="Describe the core business goals, constraints, integrations, and success metrics."></textarea>
+                <span asp-validation-for="Request.Requirements" class="field-error"></span>
+            </div>
+
+            <div class="field">
+                <label asp-for="Request.BudgetRange">Budget Range</label>
+                <select asp-for="Request.BudgetRange" asp-items="@(new SelectList(Model.BudgetRanges))">
+                    <option value="">Select budget range</option>
+                </select>
+                <span asp-validation-for="Request.BudgetRange" class="field-error"></span>
+            </div>
+
+            <div class="field">
+                <label asp-for="Request.Tone">Proposal Tone</label>
+                <select asp-for="Request.Tone" asp-items="@(new SelectList(Model.Tones))">
+                    <option value="">Select tone</option>
+                </select>
+                <span asp-validation-for="Request.Tone" class="field-error"></span>
+            </div>
+
+            <div class="button-row">
+                <button type="submit" class="btn primary">Generate Proposal</button>
+                <button type="submit" name="regenerate" value="true" class="btn ghost">Regenerate Proposal</button>
+            </div>
+
+            <p class="helper-text">API key comes from <code>GEMINI_API_KEY</code> or <code>OPENAI_API_KEY</code> based on <code>Llm:Provider</code>.</p>
+        </form>
+    </section>
+
+    <section class="card result-card">
+        <div class="card-header">
+            <div>
+                <h2>Proposal Output</h2>
+                <p>Structured sections, ready to copy into decks or client emails.</p>
+            </div>
+            <div class="card-actions">
+                <span class="status-pill">Output</span>
+                @if (Model.Result is not null)
+                {
+                    <form asp-action="DownloadPdf" method="post" id="downloadForm">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="ClientName" id="pdfClientName" value="@Model.Request.ClientName" />
+                        <input type="hidden" name="Industry" id="pdfIndustry" value="@Model.Request.Industry" />
+                        <input type="hidden" name="BudgetRange" id="pdfBudgetRange" value="@Model.Request.BudgetRange" />
+                        <input type="hidden" name="Tone" id="pdfTone" value="@Model.Request.Tone" />
+                        <input type="hidden" name="Requirements" id="pdfRequirements" value="@Model.Request.Requirements" />
+                        <input type="hidden" name="ExecutiveSummary" id="pdfExecutiveSummary" value="@Model.Result.ExecutiveSummary" />
+                        <input type="hidden" name="ScopeOfWork" id="pdfScopeOfWork" value="@Model.Result.ScopeOfWork" />
+                        <input type="hidden" name="Timeline" id="pdfTimeline" value="@Model.Result.Timeline" />
+                        <input type="hidden" name="PricingEstimate" id="pdfPricingEstimate" value="@Model.Result.PricingEstimate" />
+                        <input type="hidden" name="Assumptions" id="pdfAssumptions" value="@assumptionsText" />
+                        <input type="hidden" name="CallToAction" id="pdfCallToAction" value="@Model.Result.CallToAction" />
+                        <button type="submit" class="btn ghost small">Download PDF</button>
+                    </form>
+                }
+            </div>
+        </div>
+
+        @if (Model.Result is null)
+        {
+            <div class="empty-state">
+                <h3>Awaiting generation</h3>
+                <p>Submit the form to generate a proposal. The results will appear here for review and download.</p>
+            </div>
+        }
+        else
+        {
+            <div class="result-grid">
+                <div class="result-block">
+                    <label>Executive Summary</label>
+                    <div class="result-text static">@Model.Result.ExecutiveSummary</div>
+                </div>
+                <div class="result-block">
+                    <label>Scope of Work</label>
+                    <div class="result-text static">@Model.Result.ScopeOfWork</div>
+                </div>
+                <div class="result-block">
+                    <label>Timeline</label>
+                    <div class="result-text static">@Model.Result.Timeline</div>
+                </div>
+                <div class="result-block">
+                    <label>Pricing Estimate</label>
+                    <div class="result-text static">@Model.Result.PricingEstimate</div>
+                </div>
+                <div class="result-block">
+                    <label>Assumptions</label>
+                    <div class="result-text static">@assumptionsText</div>
+                </div>
+                <div class="result-block">
+                    <label>Call to Action</label>
+                    <div class="result-text static">@Model.Result.CallToAction</div>
+                </div>
+            </div>
+        }
+    </section>
+</div>
+
+<div id="loadingOverlay" class="loading-overlay hidden">
+    <div class="spinner"></div>
+    <p>Generating proposal...</p>
+</div>
+
+@section Scripts {
+    <script>
+        const form = document.getElementById("proposalForm");
+        const overlay = document.getElementById("loadingOverlay");
+        const downloadForm = document.getElementById("downloadForm");
+        if (form && overlay) {
+            form.addEventListener("submit", () => {
+                overlay.classList.remove("hidden");
+            });
+        }
+        const navEntries = performance.getEntriesByType("navigation");
+        if (navEntries.length > 0 && navEntries[0].type === "reload") {
+            window.location.replace("@Url.Action("Index", "Home")");
+        }
+        if (downloadForm) {
+            downloadForm.addEventListener("submit", () => {
+                const requestFields = [
+                    ["pdfClientName", "Request_ClientName"],
+                    ["pdfIndustry", "Request_Industry"],
+                    ["pdfBudgetRange", "Request_BudgetRange"],
+                    ["pdfTone", "Request_Tone"],
+                    ["pdfRequirements", "Request_Requirements"]
+                ];
+                requestFields.forEach(([hiddenId, sourceId]) => {
+                    const hidden = document.getElementById(hiddenId);
+                    const source = document.getElementById(sourceId);
+                    if (hidden) {
+                        hidden.value = source?.value ?? "";
+                    }
+                });
+            });
+        }
+    </script>
+}
