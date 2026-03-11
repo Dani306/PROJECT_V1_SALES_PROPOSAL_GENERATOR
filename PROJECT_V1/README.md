@@ -31,7 +31,7 @@ You can also set the API key and provider in `appsettings.json`:
     "Gemini": {
       "ApiKey": "YOUR_GEMINI_API_KEY",
       "ApiBase": "https://generativelanguage.googleapis.com/v1beta/models/",
-      "Model": "gemini-2.5-pro"
+      "Model": "gemini-2.5-flash"
     }
   }
 }

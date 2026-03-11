@@ -6,7 +6,7 @@ public class GeminiSettings
 
     public string ApiBase { get; set; } = "https://generativelanguage.googleapis.com/v1beta/models/";
 
-    public string Model { get; set; } = "gemini-2.5-pro";
+    public string Model { get; set; } = "gemini-2.5-flash";
 
     public int MaxRetries { get; set; } = 2;
 
