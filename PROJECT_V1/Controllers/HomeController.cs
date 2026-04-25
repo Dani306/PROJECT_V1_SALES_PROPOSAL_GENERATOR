@@ -1,3 +1,5 @@
+#nullable enable
+
 using System.Diagnostics;
 using System.IO;
 using Microsoft.AspNetCore.Mvc;
@@ -71,15 +73,24 @@ public class HomeController : Controller
         try
         {
             model.Result = await _proposalService.GenerateProposalAsync(model.Request, cancellationToken);
+            _logger.LogInformation(
+                "Proposal generated successfully for industry: {Industry}, budget: {Budget}",
+                model.Request.Industry,
+                model.Request.BudgetRange);
         }
         catch (InvalidOperationException ex)
         {
-            _logger.LogWarning(ex, "Proposal generation failed.");
+            _logger.LogWarning(ex, "Proposal generation validation failed: {Message}", ex.Message);
             model.ErrorMessage = ex.Message;
+        }
+        catch (OperationCanceledException ex)
+        {
+            _logger.LogWarning(ex, "Proposal generation request was cancelled");
+            model.ErrorMessage = "Request timed out. Please try again.";
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Proposal generation failed unexpectedly.");
+            _logger.LogError(ex, "Unexpected error during proposal generation");
             model.ErrorMessage = "We couldn't generate the proposal right now. Please try again.";
         }
 
@@ -88,27 +99,40 @@ public class HomeController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
-    public IActionResult DownloadPdf(ProposalDocumentModel document)
+    public IActionResult DownloadPdf(ProposalDocumentModel? document)
     {
-        if (string.IsNullOrWhiteSpace(document.ExecutiveSummary) &&
-            string.IsNullOrWhiteSpace(document.ScopeOfWork) &&
-            string.IsNullOrWhiteSpace(document.Timeline) &&
-            string.IsNullOrWhiteSpace(document.PricingEstimate))
+        if (document == null || !IsValidDocument(document))
         {
             var model = CreateViewModel();
             model.Request = GetDefaultRequest();
             model.ErrorMessage = "Generate a proposal before downloading the PDF.";
+            _logger.LogWarning("Download PDF attempt with invalid or empty document");
             return View("Index", model);
         }
 
-        var pdfBytes = ProposalPdfRenderer.Render(document);
-        var safeName = string.IsNullOrWhiteSpace(document.ClientName)
-            ? "Proposal"
-            : string.Concat(document.ClientName.Split(Path.GetInvalidFileNameChars()))
-                .Replace(' ', '_');
-        var fileName = $"{safeName}_Proposal_{DateTime.UtcNow:yyyyMMdd}.pdf";
+        try
+        {
+            var pdfBytes = ProposalPdfRenderer.Render(document);
+            var safeName = string.IsNullOrWhiteSpace(document.ClientName)
+                ? "Proposal"
+                : string.Concat(document.ClientName.Split(Path.GetInvalidFileNameChars()))
+                    .Replace(' ', '_');
+            var fileName = $"{safeName}_Proposal_{DateTime.UtcNow:yyyyMMdd}.pdf";
 
-        return File(pdfBytes, "application/pdf", fileName);
+            _logger.LogInformation(
+                "PDF generated successfully for client: {ClientName}",
+                string.IsNullOrWhiteSpace(document.ClientName) ? "Unknown" : document.ClientName);
+
+            return File(pdfBytes, "application/pdf", fileName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to generate PDF");
+            var model = CreateViewModel();
+            model.Request = GetDefaultRequest();
+            model.ErrorMessage = "Failed to generate PDF. Please try again.";
+            return View("Index", model);
+        }
     }
 
     private static ProposalViewModel CreateViewModel()
@@ -124,6 +148,14 @@ public class HomeController : Controller
     private static ProposalRequest GetDefaultRequest()
     {
         return new ProposalRequest();
+    }
+
+    private static bool IsValidDocument(ProposalDocumentModel document)
+    {
+        return !string.IsNullOrWhiteSpace(document.ExecutiveSummary) ||
+               !string.IsNullOrWhiteSpace(document.ScopeOfWork) ||
+               !string.IsNullOrWhiteSpace(document.Timeline) ||
+               !string.IsNullOrWhiteSpace(document.PricingEstimate);
     }
 
     [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
