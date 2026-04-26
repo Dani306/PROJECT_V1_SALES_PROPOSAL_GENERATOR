@@ -1,59 +1,134 @@
-// HomeController.cs
-
+using System.Diagnostics;
+using System.IO;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Configuration;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
+using PROJECT_V1.Models;
+using PROJECT_V1.Services;
 
-namespace PROJECT_V1_SALES_PROPOSAL_GENERATOR.Controllers
+namespace PROJECT_V1.Controllers;
+
+public class HomeController : Controller
 {
-    public class HomeController : Controller
+    private static readonly List<string> IndustryOptions = new()
     {
-        private readonly IConfiguration _configuration;
+        "SaaS",
+        "Healthcare",
+        "FinTech",
+        "Retail",
+        "Manufacturing",
+        "Logistics",
+        "Education",
+        "Hospitality",
+        "Real Estate",
+        "Other"
+    };
 
-        public HomeController(IConfiguration configuration)
+    private static readonly List<string> BudgetOptions = new()
+    {
+        "$10k - $25k",
+        "$25k - $50k",
+        "$50k - $100k",
+        "$100k - $250k",
+        "$250k+"
+    };
+
+    private static readonly List<string> ToneOptions = new()
+    {
+        "Professional",
+        "Executive",
+        "Startup"
+    };
+
+    private readonly IProposalService _proposalService;
+    private readonly ILogger<HomeController> _logger;
+
+    public HomeController(IProposalService proposalService, ILogger<HomeController> logger)
+    {
+        _proposalService = proposalService;
+        _logger = logger;
+    }
+
+    [HttpGet]
+    public IActionResult Index()
+    {
+        var model = CreateViewModel();
+        model.Request = GetDefaultRequest();
+        return View(model);
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken cancellationToken)
+    {
+        var model = CreateViewModel();
+        model.Request = request ?? new ProposalRequest();
+
+        if (!ModelState.IsValid)
         {
-            _configuration = configuration;
+            model.ErrorMessage = "Please fill out all fields so we can build a strong proposal.";
+            return View(model);
         }
 
-        // Example of an updated method with improved error handling
-        public async Task<IActionResult> GenerateProposal()
+        try
         {
-            try
-            {
-                // Injected option lists
-                var optionList = _configuration.GetSection("OptionLists").Get<YourOptionType>();
-                // Success logging
-                // Perform proposal generation logic...
-            }
-            catch (OperationCanceledException)
-            {
-                // Handle cancellation appropriately
-                return BadRequest("Proposal generation was canceled.");
-            }
-            catch (Exception ex)
-            {
-                // Handle other exceptions
-                return StatusCode(500, ex.Message);
-            }
+            model.Result = await _proposalService.GenerateProposalAsync(model.Request, cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "Proposal generation failed.");
+            model.ErrorMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Proposal generation failed unexpectedly.");
+            model.ErrorMessage = "We couldn't generate the proposal right now. Please try again.";
         }
 
-        public IActionResult DownloadPdf(int documentId)
+        return View(model);
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public IActionResult DownloadPdf(ProposalDocumentModel document)
+    {
+        if (string.IsNullOrWhiteSpace(document.ExecutiveSummary) &&
+            string.IsNullOrWhiteSpace(document.ScopeOfWork) &&
+            string.IsNullOrWhiteSpace(document.Timeline) &&
+            string.IsNullOrWhiteSpace(document.PricingEstimate))
         {
-            // Input validation
-            if (documentId <= 0)
-            {
-                return BadRequest("Invalid document ID.");
-            }
-            try
-            {
-                // PDF download logic...
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, ex.Message);
-            }
+            var model = CreateViewModel();
+            model.Request = GetDefaultRequest();
+            model.ErrorMessage = "Generate a proposal before downloading the PDF.";
+            return View("Index", model);
         }
+
+        var pdfBytes = ProposalPdfRenderer.Render(document);
+        var safeName = string.IsNullOrWhiteSpace(document.ClientName)
+            ? "Proposal"
+            : string.Concat(document.ClientName.Split(Path.GetInvalidFileNameChars()))
+                .Replace(' ', '_');
+        var fileName = $"{safeName}_Proposal_{DateTime.UtcNow:yyyyMMdd}.pdf";
+
+        return File(pdfBytes, "application/pdf", fileName);
+    }
+
+    private static ProposalViewModel CreateViewModel()
+    {
+        return new ProposalViewModel
+        {
+            Industries = IndustryOptions,
+            BudgetRanges = BudgetOptions,
+            Tones = ToneOptions
+        };
+    }
+
+    private static ProposalRequest GetDefaultRequest()
+    {
+        return new ProposalRequest();
+    }
+
+    [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
+    public IActionResult Error()
+    {
+        return View(new ErrorViewModel { RequestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier });
     }
 }
