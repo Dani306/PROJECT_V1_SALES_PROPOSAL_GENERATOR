@@ -1,54 +1,51 @@
-using Microsoft.AspNetCore.Mvc;
-using PROJECT_V1.Models;
-using PROJECT_V1.Abstractions; // Contains IResult and Success/Failure types
-
-namespace PROJECT_V1.Controllers;
-
 [Route("[controller]")]
 public class HomeController : Controller
 {
     private readonly IProposalService _proposalService;
-    private readonly IProposalViewModelFactory _viewModelFactory;
+    private readonly IProposalViewModelService _viewModelService;
+    private readonly ILogger<HomeController> _logger;
 
     public HomeController(
         IProposalService proposalService, 
-        IProposalViewModelFactory viewModelFactory)
+        IProposalViewModelService viewModelService,
+        ILogger<HomeController> logger)
     {
         _proposalService = proposalService;
-        _viewModelFactory = viewModelFactory;
+        _viewModelService = viewModelService;
+        _logger = logger;
     }
 
     [HttpGet]
     public IActionResult Index() 
-        => View(_viewModelFactory.Create());
+        => View(_viewModelService.BuildInitialModel());
 
     [HttpPost]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken ct)
     {
         if (!ModelState.IsValid)
-            return View(_viewModelFactory.Create(request, "Please correct the errors below."));
+            return View(_viewModelService.BuildErrorModel(request, "Please fill out all required fields."));
 
-        // Using a Result pattern instead of raw try-catch
-        var result = await _proposalService.GenerateProposalAsync(request, ct);
-
-        return result.Match(
-            success => View(_viewModelFactory.Create(request, success)),
-            failure => View(_viewModelFactory.Create(request, failure.Message))
-        );
+        try
+        {
+            var result = await _proposalService.GenerateProposalAsync(request, ct);
+            return View(_viewModelService.BuildSuccessModel(request, result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Proposal generation failed for {Client}", request.ClientName);
+            return View(_viewModelService.BuildErrorModel(request, "An unexpected error occurred. Please try again."));
+        }
     }
 
     [HttpPost]
     [ValidateAntiForgeryToken]
     public IActionResult DownloadPdf(ProposalDocumentModel document)
     {
-        return document switch
-        {
-            { IsEmpty: true } => RedirectToAction(nameof(Index)),
-            _ => File(
-                ProposalPdfRenderer.Render(document), 
-                "application/pdf", 
-                document.FileName)
-        };
+        if (document.IsMissingContent())
+            return RedirectToAction(nameof(Index));
+
+        var pdfBytes = ProposalPdfRenderer.Render(document);
+        return File(pdfBytes, "application/pdf", document.GenerateFileName());
     }
 }
