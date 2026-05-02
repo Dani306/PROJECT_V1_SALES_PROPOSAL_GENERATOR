@@ -1,38 +1,51 @@
 [Route("[controller]")]
-public sealed class HomeController(
-    IProposalService proposalService, 
-    IProposalViewModelFactory viewModelFactory) : Controller
+public class HomeController : Controller
 {
+    private readonly IProposalService _proposalService;
+    private readonly IProposalViewModelService _viewModelService;
+    private readonly ILogger<HomeController> _logger;
+
+    public HomeController(
+        IProposalService proposalService, 
+        IProposalViewModelService viewModelService,
+        ILogger<HomeController> logger)
+    {
+        _proposalService = proposalService;
+        _viewModelService = viewModelService;
+        _logger = logger;
+    }
+
     [HttpGet]
     public IActionResult Index() 
-        => View(viewModelFactory.CreateInitial());
+        => View(_viewModelService.BuildInitialModel());
 
-    [HttpPost, ValidateAntiForgeryToken]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
     public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken ct)
     {
         if (!ModelState.IsValid)
-            return View(viewModelFactory.CreateError(request, "Invalid input."));
+            return View(_viewModelService.BuildErrorModel(request, "Please fill out all required fields."));
 
-        // ValueTask-based service call reduces heap allocation for frequent requests
-        var result = await proposalService.GenerateProposalAsync(request, ct);
-
-        return result.Match(
-            success => View(viewModelFactory.CreateSuccess(request, success)),
-            failure => View(viewModelFactory.CreateError(request, failure.Message))
-        );
+        try
+        {
+            var result = await _proposalService.GenerateProposalAsync(request, ct);
+            return View(_viewModelService.BuildSuccessModel(request, result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Proposal generation failed for {Client}", request.ClientName);
+            return View(_viewModelService.BuildErrorModel(request, "An unexpected error occurred. Please try again."));
+        }
     }
 
-    [HttpPost, ValidateAntiForgeryToken]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
     public IActionResult DownloadPdf(ProposalDocumentModel document)
     {
-        // Pattern matching avoids multiple null/empty checks
-        if (document is { IsEmpty: true }) 
+        if (document.IsMissingContent())
             return RedirectToAction(nameof(Index));
 
-        // FileStreamResult is more memory efficient for large PDFs than returning byte[]
-        return File(
-            ProposalPdfRenderer.RenderToStream(document), 
-            "application/pdf", 
-            document.GetSafeFileName());
+        var pdfBytes = ProposalPdfRenderer.Render(document);
+        return File(pdfBytes, "application/pdf", document.GenerateFileName());
     }
 }
