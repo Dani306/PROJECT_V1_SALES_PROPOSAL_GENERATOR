@@ -5,33 +5,34 @@ public sealed class HomeController(
 {
     [HttpGet]
     public IActionResult Index() 
-        => View(viewModelFactory.Create());
+        => View(viewModelFactory.CreateInitial());
 
     [HttpPost, ValidateAntiForgeryToken]
     public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken ct)
     {
         if (!ModelState.IsValid)
-            return View(viewModelFactory.Create(request, "Invalid input details."));
+            return View(viewModelFactory.CreateError(request, "Invalid input."));
 
-        // The service returns a Discriminated Union (Result)
-        var outcome = await proposalService.GenerateAsync(request, ct);
+        // ValueTask-based service call reduces heap allocation for frequent requests
+        var result = await proposalService.GenerateProposalAsync(request, ct);
 
-        return outcome switch
-        {
-            { IsSuccess: true } => View(viewModelFactory.Create(request, outcome.Value)),
-            _ => View(viewModelFactory.Create(request, outcome.Error))
-        };
+        return result.Match(
+            success => View(viewModelFactory.CreateSuccess(request, success)),
+            failure => View(viewModelFactory.CreateError(request, failure.Message))
+        );
     }
 
     [HttpPost, ValidateAntiForgeryToken]
     public IActionResult DownloadPdf(ProposalDocumentModel document)
     {
-        // Guard clause using the model's internal domain logic
-        if (document.IsInvalid) return RedirectToAction(nameof(Index));
+        // Pattern matching avoids multiple null/empty checks
+        if (document is { IsEmpty: true }) 
+            return RedirectToAction(nameof(Index));
 
+        // FileStreamResult is more memory efficient for large PDFs than returning byte[]
         return File(
-            document.ToStream(), 
+            ProposalPdfRenderer.RenderToStream(document), 
             "application/pdf", 
-            document.SafeFileName);
+            document.GetSafeFileName());
     }
 }
