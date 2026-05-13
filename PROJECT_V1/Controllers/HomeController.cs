@@ -1,37 +1,134 @@
-[Route("[controller]")]
-public sealed class HomeController(
-    IProposalService proposalService, 
-    IProposalViewModelFactory viewModelFactory) : Controller
+using System.Diagnostics;
+using System.IO;
+using Microsoft.AspNetCore.Mvc;
+using PROJECT_V1.Models;
+using PROJECT_V1.Services;
+
+namespace PROJECT_V1.Controllers;
+
+public class HomeController : Controller
 {
-    [HttpGet]
-    public IActionResult Index() 
-        => View(viewModelFactory.Create());
-
-    [HttpPost, ValidateAntiForgeryToken]
-    public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken ct)
+    private static readonly List<string> IndustryOptions = new()
     {
+        "SaaS",
+        "Healthcare",
+        "FinTech",
+        "Retail",
+        "Manufacturing",
+        "Logistics",
+        "Education",
+        "Hospitality",
+        "Real Estate",
+        "Other"
+    };
+
+    private static readonly List<string> BudgetOptions = new()
+    {
+        "$10k - $25k",
+        "$25k - $50k",
+        "$50k - $100k",
+        "$100k - $250k",
+        "$250k+"
+    };
+
+    private static readonly List<string> ToneOptions = new()
+    {
+        "Professional",
+        "Executive",
+        "Startup"
+    };
+
+    private readonly IProposalService _proposalService;
+    private readonly ILogger<HomeController> _logger;
+
+    public HomeController(IProposalService proposalService, ILogger<HomeController> logger)
+    {
+        _proposalService = proposalService;
+        _logger = logger;
+    }
+
+    [HttpGet]
+    public IActionResult Index()
+    {
+        var model = CreateViewModel();
+        model.Request = GetDefaultRequest();
+        return View(model);
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken cancellationToken)
+    {
+        var model = CreateViewModel();
+        model.Request = request ?? new ProposalRequest();
+
         if (!ModelState.IsValid)
-            return View(viewModelFactory.Create(request, "Invalid input details."));
-
-        // The service returns a Discriminated Union (Result)
-        var outcome = await proposalService.GenerateAsync(request, ct);
-
-        return outcome switch
         {
-            { IsSuccess: true } => View(viewModelFactory.Create(request, outcome.Value)),
-            _ => View(viewModelFactory.Create(request, outcome.Error))
+            model.ErrorMessage = "Please fill out all fields so we can build a strong proposal.";
+            return View(model);
+        }
+
+        try
+        {
+            model.Result = await _proposalService.GenerateProposalAsync(model.Request, cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "Proposal generation failed.");
+            model.ErrorMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Proposal generation failed unexpectedly.");
+            model.ErrorMessage = "We couldn't generate the proposal right now. Please try again.";
+        }
+
+        return View(model);
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public IActionResult DownloadPdf(ProposalDocumentModel document)
+    {
+        if (string.IsNullOrWhiteSpace(document.ExecutiveSummary) &&
+            string.IsNullOrWhiteSpace(document.ScopeOfWork) &&
+            string.IsNullOrWhiteSpace(document.Timeline) &&
+            string.IsNullOrWhiteSpace(document.PricingEstimate))
+        {
+            var model = CreateViewModel();
+            model.Request = GetDefaultRequest();
+            model.ErrorMessage = "Generate a proposal before downloading the PDF.";
+            return View("Index", model);
+        }
+
+        var pdfBytes = ProposalPdfRenderer.Render(document);
+        var safeName = string.IsNullOrWhiteSpace(document.ClientName)
+            ? "Proposal"
+            : string.Concat(document.ClientName.Split(Path.GetInvalidFileNameChars()))
+                .Replace(' ', '_');
+        var fileName = $"{safeName}_Proposal_{DateTime.UtcNow:yyyyMMdd}.pdf";
+
+        return File(pdfBytes, "application/pdf", fileName);
+    }
+
+    private static ProposalViewModel CreateViewModel()
+    {
+        return new ProposalViewModel
+        {
+            Industries = IndustryOptions,
+            BudgetRanges = BudgetOptions,
+            Tones = ToneOptions
         };
     }
 
-    [HttpPost, ValidateAntiForgeryToken]
-    public IActionResult DownloadPdf(ProposalDocumentModel document)
+    private static ProposalRequest GetDefaultRequest()
     {
-        // Guard clause using the model's internal domain logic
-        if (document.IsInvalid) return RedirectToAction(nameof(Index));
+        return new ProposalRequest();
+    }
 
-        return File(
-            document.ToStream(), 
-            "application/pdf", 
-            document.SafeFileName);
+    [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
+    public IActionResult Error()
+    {
+        return View(new ErrorViewModel { RequestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier });
     }
 }
