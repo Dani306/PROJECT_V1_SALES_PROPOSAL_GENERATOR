@@ -1,27 +1,37 @@
+using Microsoft.Extensions.Options;
+using PROJECT_V1.Models;
+
 namespace PROJECT_V1.Services;
 
-public sealed class LlmProposalService(
-    IEnumerable<IProposalProvider> providers,
-    IOptions<LlmOptions> options) : IProposalService
+public class LlmProposalService : IProposalService
 {
-    private readonly LlmOptions _options = options.Value;
+    private readonly IProposalService _openAiService;
+    private readonly IProposalService _geminiService;
+    private readonly LlmOptions _options;
 
-    public async Task<Result<ProposalResponse>> GenerateProposalAsync(
-        ProposalRequest request, 
-        CancellationToken ct = default)
+    public LlmProposalService(
+        OpenAiProposalService openAiService,
+        GeminiProposalService geminiService,
+        IOptions<LlmOptions> options)
     {
-        var providerName = _options.Provider ?? "Gemini";
+        _openAiService = openAiService;
+        _geminiService = geminiService;
+        _options = options.Value;
+    }
 
-        // Strategy Pattern: Find the service that matches the configured name
-        var service = providers.FirstOrDefault(p => 
-            p.ProviderName.Equals(providerName, StringComparison.OrdinalIgnoreCase));
-
-        if (service is null)
+    public Task<ProposalResponse> GenerateProposalAsync(ProposalRequest request, CancellationToken cancellationToken = default)
+    {
+        var provider = (_options.Provider ?? string.Empty).Trim();
+        if (provider.Equals("Gemini", StringComparison.OrdinalIgnoreCase))
         {
-            return Result<ProposalResponse>.Failure(
-                $"LLM provider '{providerName}' is not registered or supported.");
+            return _geminiService.GenerateProposalAsync(request, cancellationToken);
         }
 
-        return await service.GenerateProposalAsync(request, ct);
+        if (provider.Equals("OpenAI", StringComparison.OrdinalIgnoreCase))
+        {
+            return _openAiService.GenerateProposalAsync(request, cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Unknown LLM provider '{_options.Provider}'. Use 'Gemini' or 'OpenAI'.");
     }
 }

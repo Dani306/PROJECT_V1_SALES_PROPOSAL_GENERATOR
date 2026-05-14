@@ -1,88 +1,153 @@
-using System.Net.Http.Json;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using PROJECT_V1.Models;
-using PROJECT_V1.Infrastructure;
 
 namespace PROJECT_V1.Services;
 
-public sealed class GeminiProposalService(
-    HttpClient httpClient,
-    IOptions<LlmOptions> options,
-    IOptions<ProposalGeneratorOptions> proposalOptions,
-    ILogger<GeminiProposalService> logger) : IProposalService
+public class GeminiProposalService : IProposalService
 {
-    private readonly GeminiSettings _settings = options.Value.Gemini;
-    private readonly ProposalGeneratorOptions _genOptions = proposalOptions.Value;
+    private readonly HttpClient _httpClient;
+    private readonly GeminiSettings _settings;
+    private readonly ProposalGeneratorOptions _proposalOptions;
+    private readonly ILogger<GeminiProposalService> _logger;
 
-    public async Task<Result<ProposalResponse>> GenerateProposalAsync(
-        ProposalRequest request, 
-        CancellationToken ct = default)
+    public GeminiProposalService(
+        IHttpClientFactory httpClientFactory,
+        IOptions<LlmOptions> options,
+        IOptions<ProposalGeneratorOptions> proposalOptions,
+        ILogger<GeminiProposalService> logger)
+    {
+        _httpClient = httpClientFactory.CreateClient("Gemini");
+        _settings = options.Value.Gemini;
+        _proposalOptions = proposalOptions.Value;
+        _logger = logger;
+    }
+
+    public async Task<ProposalResponse> GenerateProposalAsync(ProposalRequest request, CancellationToken cancellationToken = default)
     {
         var apiKey = ResolveApiKey();
         if (string.IsNullOrWhiteSpace(apiKey))
-            return "Configuration error: API Key is missing.";
-
-        // Use a PathString or specialized URI builder to prevent slash issues
-        var uri = $"{_settings.Model}:generateContent?key={apiKey}";
-
-        try
         {
-            // 1. Optimized Payload construction using internal DTOs
-            var payload = CreateRequestPayload(request);
+            throw new InvalidOperationException("Missing Gemini API key. Set GEMINI_API_KEY or Llm:Gemini:ApiKey in appsettings.json.");
+        }
 
-            // 2. Use Source-Generated JSON context for zero-reflection serialization
-            using var response = await httpClient.PostAsJsonAsync(
-                uri, 
-                payload, 
-                GeminiJsonContext.Default.GeminiRequest, 
-                ct);
-
-            if (!response.IsSuccessStatusCode)
-                return await HandleApiError(response, ct);
-
-            // 3. Stream direct to DTO to keep memory footprint low
-            var data = await response.Content.ReadFromJsonAsync(
-                GeminiJsonContext.Default.GeminiRawResponse, 
-                ct);
-
-            return data?.Candidates?.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text switch
+        var (systemPrompt, userPrompt) = ProposalPromptBuilder.BuildPrompt(request);
+        var combinedPrompt = $"{systemPrompt}\n\n{userPrompt}";
+        var payload = new
+        {
+            contents = new[]
             {
-                { Length: > 0 } text => ProposalResponseParser.Parse(text),
-                _ => "The AI generated an empty response. Please adjust your prompt."
-            };
-        }
-        catch (OperationCanceledException)
-        {
-            return "The request timed out. Please try again.";
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Gemini service fault for client: {Client}", request.ClientName);
-            return "A technical fault occurred. Support has been notified.";
-        }
-    }
-
-    private GeminiRequest CreateRequestPayload(ProposalRequest request)
-    {
-        var (system, user) = ProposalPromptBuilder.BuildPrompt(request);
-        return new GeminiRequest(
-            [new Content("user", [new Part($"{system}\n\n{user}")])],
-            new GenerationConfig(_genOptions.Temperature, _genOptions.MaxOutputTokens)
-        );
-    }
-
-    private async Task<string> HandleApiError(HttpResponseMessage response, CancellationToken ct)
-    {
-        var body = await response.Content.ReadAsStringAsync(ct);
-        logger.LogError("Gemini API Failure | Status: {Status} | Response: {Body}", response.StatusCode, body);
-        
-        return response.StatusCode switch
-        {
-            System.Net.HttpStatusCode.Unauthorized => "AI Service authentication failed.",
-            System.Net.HttpStatusCode.TooManyRequests => "Rate limit exceeded. Please wait a moment.",
-            _ => "The AI service is currently unavailable."
+                new
+                {
+                    role = "user",
+                    parts = new[]
+                    {
+                        new { text = combinedPrompt }
+                    }
+                }
+            },
+            generationConfig = new
+            {
+                temperature = _proposalOptions.Temperature,
+                maxOutputTokens = _proposalOptions.MaxOutputTokens,
+                responseMimeType = "application/json"
+            }
         };
+
+        var maxRetries = Math.Max(0, _settings.MaxRetries);
+        for (var attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                var baseUrl = _settings.ApiBase.TrimEnd('/') + "/";
+                var endpoint = $"{baseUrl}{_settings.Model}:generateContent";
+                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
+                httpRequest.Headers.Add("x-goog-api-key", apiKey);
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                httpRequest.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+                using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
+                var responseContent = await response.Content.ReadAsStringAsync(cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Gemini API failure: {Status} {Body}", response.StatusCode, responseContent);
+                    throw new InvalidOperationException("The AI service returned an error. Please verify your API key and try again.");
+                }
+
+                var proposalJson = ExtractProposalJson(responseContent);
+                return ProposalResponseParser.Parse(proposalJson);
+            }
+            catch (Exception ex) when (attempt < maxRetries)
+            {
+                _logger.LogWarning(ex, "Gemini attempt {Attempt} failed. Retrying...", attempt + 1);
+                await Task.Delay(250 * (attempt + 1), cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException("The AI service failed after multiple retries. Please try again.");
     }
 
-    private string ResolveApiKey() => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? _settings.ApiKey;
+    private string ResolveApiKey()
+    {
+        var envKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+        return string.IsNullOrWhiteSpace(envKey) ? _settings.ApiKey : envKey;
+    }
+
+    private static string ExtractProposalJson(string rawResponse)
+    {
+        using var doc = JsonDocument.Parse(rawResponse);
+        if (!doc.RootElement.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
+        {
+            throw new InvalidOperationException("The AI response was missing candidates.");
+        }
+
+        var candidate = candidates[0];
+        if (!candidate.TryGetProperty("content", out var content))
+        {
+            throw new InvalidOperationException("The AI response was missing content.");
+        }
+
+        if (!content.TryGetProperty("parts", out var parts))
+        {
+            throw new InvalidOperationException("The AI response was missing parts.");
+        }
+
+        var builder = new StringBuilder();
+        foreach (var part in parts.EnumerateArray())
+        {
+            if (part.TryGetProperty("text", out var text))
+            {
+                builder.Append(text.GetString());
+            }
+        }
+
+        var payload = builder.ToString().Trim();
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            throw new InvalidOperationException("The AI response was empty.");
+        }
+
+        return ExtractJsonBlock(payload);
+    }
+
+    private static string ExtractJsonBlock(string payload)
+    {
+        payload = payload.Trim();
+        if (payload.StartsWith("{") && payload.EndsWith("}"))
+        {
+            return payload;
+        }
+
+        var firstBrace = payload.IndexOf('{');
+        var lastBrace = payload.LastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace)
+        {
+            return payload.Substring(firstBrace, lastBrace - firstBrace + 1);
+        }
+
+        return payload;
+    }
 }
