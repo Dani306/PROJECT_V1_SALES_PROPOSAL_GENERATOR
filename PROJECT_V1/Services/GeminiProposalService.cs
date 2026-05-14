@@ -1,28 +1,18 @@
 using System.Net.Http.Json;
 using Microsoft.Extensions.Options;
 using PROJECT_V1.Models;
-using PROJECT_V1.Infrastructure; // Assuming Result<T> lives here
+using PROJECT_V1.Infrastructure;
 
 namespace PROJECT_V1.Services;
 
-public sealed class GeminiProposalService : IProposalService
+public sealed class GeminiProposalService(
+    HttpClient httpClient,
+    IOptions<LlmOptions> options,
+    IOptions<ProposalGeneratorOptions> proposalOptions,
+    ILogger<GeminiProposalService> logger) : IProposalService
 {
-    private readonly HttpClient _httpClient;
-    private readonly GeminiSettings _settings;
-    private readonly ProposalGeneratorOptions _proposalOptions;
-    private readonly ILogger<GeminiProposalService> _logger;
-
-    public GeminiProposalService(
-        HttpClient httpClient, // Using a Typed Client
-        IOptions<LlmOptions> options,
-        IOptions<ProposalGeneratorOptions> proposalOptions,
-        ILogger<GeminiProposalService> logger)
-    {
-        _httpClient = httpClient;
-        _settings = options.Value.Gemini;
-        _proposalOptions = proposalOptions.Value;
-        _logger = logger;
-    }
+    private readonly GeminiSettings _settings = options.Value.Gemini;
+    private readonly ProposalGeneratorOptions _genOptions = proposalOptions.Value;
 
     public async Task<Result<ProposalResponse>> GenerateProposalAsync(
         ProposalRequest request, 
@@ -30,55 +20,69 @@ public sealed class GeminiProposalService : IProposalService
     {
         var apiKey = ResolveApiKey();
         if (string.IsNullOrWhiteSpace(apiKey))
-            return "API Key is missing. Check your configuration.";
+            return "Configuration error: API Key is missing.";
 
-        var payload = BuildPayload(request);
-        var endpoint = $"{_settings.Model}:generateContent?key={apiKey}";
+        // Use a PathString or specialized URI builder to prevent slash issues
+        var uri = $"{_settings.Model}:generateContent?key={apiKey}";
 
         try
         {
-            // Use PostAsJsonAsync to avoid manual string serialization/encoding
-            using var response = await _httpClient.PostAsJsonAsync(endpoint, payload, ct);
-            
-            if (!response.IsSuccessStatusCode)
-            {
-                var errorBody = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogError("Gemini API Error: {Status} - {Body}", response.StatusCode, errorBody);
-                return "The AI service encountered an error. Please try again later.";
-            }
+            // 1. Optimized Payload construction using internal DTOs
+            var payload = CreateRequestPayload(request);
 
-            var geminiResponse = await response.Content.ReadFromJsonAsync<GeminiRawResponse>(cancellationToken: ct);
-            
-            return ExtractText(geminiResponse) switch
+            // 2. Use Source-Generated JSON context for zero-reflection serialization
+            using var response = await httpClient.PostAsJsonAsync(
+                uri, 
+                payload, 
+                GeminiJsonContext.Default.GeminiRequest, 
+                ct);
+
+            if (!response.IsSuccessStatusCode)
+                return await HandleApiError(response, ct);
+
+            // 3. Stream direct to DTO to keep memory footprint low
+            var data = await response.Content.ReadFromJsonAsync(
+                GeminiJsonContext.Default.GeminiRawResponse, 
+                ct);
+
+            return data?.Candidates?.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text switch
             {
-                { } text => ProposalResponseParser.Parse(text),
-                null => "The AI returned an empty or invalid response."
+                { Length: > 0 } text => ProposalResponseParser.Parse(text),
+                _ => "The AI generated an empty response. Please adjust your prompt."
             };
+        }
+        catch (OperationCanceledException)
+        {
+            return "The request timed out. Please try again.";
         }
         catch (Exception ex)
         {
-            _logger.LogCritical(ex, "Unrecoverable failure in Proposal Service");
-            return "A technical error occurred during proposal generation.";
+            logger.LogError(ex, "Gemini service fault for client: {Client}", request.ClientName);
+            return "A technical fault occurred. Support has been notified.";
         }
     }
 
-    private object BuildPayload(ProposalRequest request)
+    private GeminiRequest CreateRequestPayload(ProposalRequest request)
     {
         var (system, user) = ProposalPromptBuilder.BuildPrompt(request);
-        return new
-        {
-            contents = new[] { new { role = "user", parts = new[] { new { text = $"{system}\n\n{user}" } } } },
-            generationConfig = new
-            {
-                temperature = _proposalOptions.Temperature,
-                maxOutputTokens = _proposalOptions.MaxOutputTokens,
-                responseMimeType = "application/json"
-            }
-        };
+        return new GeminiRequest(
+            [new Content("user", [new Part($"{system}\n\n{user}")])],
+            new GenerationConfig(_genOptions.Temperature, _genOptions.MaxOutputTokens)
+        );
     }
 
-    private string? ExtractText(GeminiRawResponse? response) 
-        => response?.Candidates?.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text;
+    private async Task<string> HandleApiError(HttpResponseMessage response, CancellationToken ct)
+    {
+        var body = await response.Content.ReadAsStringAsync(ct);
+        logger.LogError("Gemini API Failure | Status: {Status} | Response: {Body}", response.StatusCode, body);
+        
+        return response.StatusCode switch
+        {
+            System.Net.HttpStatusCode.Unauthorized => "AI Service authentication failed.",
+            System.Net.HttpStatusCode.TooManyRequests => "Rate limit exceeded. Please wait a moment.",
+            _ => "The AI service is currently unavailable."
+        };
+    }
 
     private string ResolveApiKey() => Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? _settings.ApiKey;
 }
