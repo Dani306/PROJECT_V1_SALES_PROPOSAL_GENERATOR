@@ -1,37 +1,27 @@
-using Microsoft.Extensions.Options;
-using PROJECT_V1.Models;
-
 namespace PROJECT_V1.Services;
 
-public class LlmProposalService : IProposalService
+public sealed class LlmProposalService(
+    IEnumerable<IProposalProvider> providers,
+    IOptions<LlmOptions> options) : IProposalService
 {
-    private readonly IProposalService _openAiService;
-    private readonly IProposalService _geminiService;
-    private readonly LlmOptions _options;
+    private readonly LlmOptions _options = options.Value;
 
-    public LlmProposalService(
-        OpenAiProposalService openAiService,
-        GeminiProposalService geminiService,
-        IOptions<LlmOptions> options)
+    public async Task<Result<ProposalResponse>> GenerateProposalAsync(
+        ProposalRequest request, 
+        CancellationToken ct = default)
     {
-        _openAiService = openAiService;
-        _geminiService = geminiService;
-        _options = options.Value;
-    }
+        var providerName = _options.Provider ?? "Gemini";
 
-    public Task<ProposalResponse> GenerateProposalAsync(ProposalRequest request, CancellationToken cancellationToken = default)
-    {
-        var provider = (_options.Provider ?? string.Empty).Trim();
-        if (provider.Equals("Gemini", StringComparison.OrdinalIgnoreCase))
+        // Strategy Pattern: Find the service that matches the configured name
+        var service = providers.FirstOrDefault(p => 
+            p.ProviderName.Equals(providerName, StringComparison.OrdinalIgnoreCase));
+
+        if (service is null)
         {
-            return _geminiService.GenerateProposalAsync(request, cancellationToken);
+            return Result<ProposalResponse>.Failure(
+                $"LLM provider '{providerName}' is not registered or supported.");
         }
 
-        if (provider.Equals("OpenAI", StringComparison.OrdinalIgnoreCase))
-        {
-            return _openAiService.GenerateProposalAsync(request, cancellationToken);
-        }
-
-        throw new InvalidOperationException($"Unknown LLM provider '{_options.Provider}'. Use 'Gemini' or 'OpenAI'.");
+        return await service.GenerateProposalAsync(request, ct);
     }
 }
