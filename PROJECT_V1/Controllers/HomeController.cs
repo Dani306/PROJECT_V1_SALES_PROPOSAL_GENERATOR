@@ -1,134 +1,51 @@
-using System.Diagnostics;
-using System.IO;
 using Microsoft.AspNetCore.Mvc;
 using PROJECT_V1.Models;
 using PROJECT_V1.Services;
+using PROJECT_V1.Infrastructure; // Assuming Result<T> lives here
 
 namespace PROJECT_V1.Controllers;
 
-public class HomeController : Controller
+[Route("[controller]")]
+public sealed class HomeController(
+    IProposalService proposalService,
+    IProposalViewModelFactory viewModelFactory,
+    ILogger<HomeController> logger) : Controller
 {
-    private static readonly List<string> IndustryOptions = new()
-    {
-        "SaaS",
-        "Healthcare",
-        "FinTech",
-        "Retail",
-        "Manufacturing",
-        "Logistics",
-        "Education",
-        "Hospitality",
-        "Real Estate",
-        "Other"
-    };
-
-    private static readonly List<string> BudgetOptions = new()
-    {
-        "$10k - $25k",
-        "$25k - $50k",
-        "$50k - $100k",
-        "$100k - $250k",
-        "$250k+"
-    };
-
-    private static readonly List<string> ToneOptions = new()
-    {
-        "Professional",
-        "Executive",
-        "Startup"
-    };
-
-    private readonly IProposalService _proposalService;
-    private readonly ILogger<HomeController> _logger;
-
-    public HomeController(IProposalService proposalService, ILogger<HomeController> logger)
-    {
-        _proposalService = proposalService;
-        _logger = logger;
-    }
-
     [HttpGet]
-    public IActionResult Index()
-    {
-        var model = CreateViewModel();
-        model.Request = GetDefaultRequest();
-        return View(model);
-    }
+    public IActionResult Index() 
+        => View(viewModelFactory.CreateInitial());
 
-    [HttpPost]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken cancellationToken)
+    [HttpPost, ValidateAntiForgeryToken]
+    public async Task<IActionResult> Index([Bind(Prefix = "Request")] ProposalRequest request, CancellationToken ct)
     {
-        var model = CreateViewModel();
-        model.Request = request ?? new ProposalRequest();
-
         if (!ModelState.IsValid)
-        {
-            model.ErrorMessage = "Please fill out all fields so we can build a strong proposal.";
-            return View(model);
-        }
+            return View(viewModelFactory.CreateError(request, "Please fill out all required fields."));
 
-        try
-        {
-            model.Result = await _proposalService.GenerateProposalAsync(model.Request, cancellationToken);
-        }
-        catch (InvalidOperationException ex)
-        {
-            _logger.LogWarning(ex, "Proposal generation failed.");
-            model.ErrorMessage = ex.Message;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Proposal generation failed unexpectedly.");
-            model.ErrorMessage = "We couldn't generate the proposal right now. Please try again.";
-        }
+        // Use the Result pattern instead of try-catch for better performance
+        var result = await proposalService.GenerateProposalAsync(request, ct);
 
-        return View(model);
+        return result.Match<IActionResult>(
+            success => View(viewModelFactory.CreateSuccess(request, success)),
+            failure => {
+                logger.LogWarning("Proposal failed: {Message}", failure);
+                return View(viewModelFactory.CreateError(request, failure));
+            }
+        );
     }
 
-    [HttpPost]
-    [ValidateAntiForgeryToken]
+    [HttpPost, ValidateAntiForgeryToken]
     public IActionResult DownloadPdf(ProposalDocumentModel document)
     {
-        if (string.IsNullOrWhiteSpace(document.ExecutiveSummary) &&
-            string.IsNullOrWhiteSpace(document.ScopeOfWork) &&
-            string.IsNullOrWhiteSpace(document.Timeline) &&
-            string.IsNullOrWhiteSpace(document.PricingEstimate))
+        if (document is { IsEmpty: true })
         {
-            var model = CreateViewModel();
-            model.Request = GetDefaultRequest();
-            model.ErrorMessage = "Generate a proposal before downloading the PDF.";
-            return View("Index", model);
+            return RedirectToAction(nameof(Index), new { error = "Generate a proposal first." });
         }
 
-        var pdfBytes = ProposalPdfRenderer.Render(document);
-        var safeName = string.IsNullOrWhiteSpace(document.ClientName)
-            ? "Proposal"
-            : string.Concat(document.ClientName.Split(Path.GetInvalidFileNameChars()))
-                .Replace(' ', '_');
-        var fileName = $"{safeName}_Proposal_{DateTime.UtcNow:yyyyMMdd}.pdf";
-
-        return File(pdfBytes, "application/pdf", fileName);
-    }
-
-    private static ProposalViewModel CreateViewModel()
-    {
-        return new ProposalViewModel
-        {
-            Industries = IndustryOptions,
-            BudgetRanges = BudgetOptions,
-            Tones = ToneOptions
-        };
-    }
-
-    private static ProposalRequest GetDefaultRequest()
-    {
-        return new ProposalRequest();
+        // Return a FileStreamResult to avoid loading the entire byte array into memory
+        var pdfStream = ProposalPdfRenderer.RenderToStream(document);
+        return File(pdfStream, "application/pdf", document.GenerateFileName());
     }
 
     [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
-    public IActionResult Error()
-    {
-        return View(new ErrorViewModel { RequestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier });
-    }
+    public IActionResult Error() => View();
 }
