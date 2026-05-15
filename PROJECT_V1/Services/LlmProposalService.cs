@@ -1,28 +1,37 @@
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using PROJECT_V1.Models;
-using PROJECT_V1.Infrastructure;
 
 namespace PROJECT_V1.Services;
 
-public sealed class LlmProposalService(
-    IServiceProvider serviceProvider,
-    IOptions<LlmOptions> options) : IProposalService
+public class LlmProposalService : IProposalService
 {
-    public async Task<Result<ProposalResponse>> GenerateProposalAsync(
-        ProposalRequest request, 
-        CancellationToken ct = default)
+    private readonly IProposalService _openAiService;
+    private readonly IProposalService _geminiService;
+    private readonly LlmOptions _options;
+
+    public LlmProposalService(
+        OpenAiProposalService openAiService,
+        GeminiProposalService geminiService,
+        IOptions<LlmOptions> options)
     {
-        var providerKey = options.Value.Provider?.Trim();
+        _openAiService = openAiService;
+        _geminiService = geminiService;
+        _options = options.Value;
+    }
 
-        // Resolve the specific provider dynamically based on configuration
-        var provider = serviceProvider.GetKeyedService<IProposalService>(providerKey);
-
-        if (provider is null)
+    public Task<ProposalResponse> GenerateProposalAsync(ProposalRequest request, CancellationToken cancellationToken = default)
+    {
+        var provider = (_options.Provider ?? string.Empty).Trim();
+        if (provider.Equals("Gemini", StringComparison.OrdinalIgnoreCase))
         {
-            return Result.Failure($"LLM provider '{providerKey}' is not configured or supported.");
+            return _geminiService.GenerateProposalAsync(request, cancellationToken);
         }
 
-        return await provider.GenerateProposalAsync(request, ct);
+        if (provider.Equals("OpenAI", StringComparison.OrdinalIgnoreCase))
+        {
+            return _openAiService.GenerateProposalAsync(request, cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Unknown LLM provider '{_options.Provider}'. Use 'Gemini' or 'OpenAI'.");
     }
 }
